@@ -205,7 +205,7 @@ If any question (blocking or non-blocking) remains unanswered: STOP. Do not crea
 
 #### 4.0 Output Location
 
-The implementation plan MUST be saved as a markdown file in the `./dev/plan/` directory. If the directory does not exist, create it first. Use a descriptive filename based on the ticket (e.g., `./dev/plan/add-user-export-feature.md`).
+The implementation plan MUST be saved as a markdown file at `./spike/SYS_[NUMBER]_PLAN.md`, where `[NUMBER]` is the ticket number extracted from the Linear ticket ID or branch name (e.g., `./spike/SYS_816_PLAN.md`). If the `./spike/` directory does not exist, create it first. If the ticket number cannot be determined, ask the user for it before saving.
 
 #### 4.1 Define Implementation Approach
 
@@ -272,7 +272,7 @@ Explicit checklist for ticket completion.
 
 ### If ALL questions are resolved (blocking and non-blocking):
 
-Produce the full analysis: Executive Summary (3–5 sentences) → Phase 1 → Phase 2 → Phase 3 → Phase 4. Save the Phase 4 implementation plan as a markdown file in `./dev/plan/`.
+Produce the full analysis: Executive Summary (3–5 sentences) → Phase 1 → Phase 2 → Phase 3 → Phase 4. Save the Phase 4 implementation plan as a markdown file in `./spike/`.
 
 End with two suggested next steps:
 
@@ -281,7 +281,7 @@ End with two suggested next steps:
 
 ### If ANY questions remain unresolved (blocking or non-blocking):
 
-Produce the partial analysis: Executive Summary (stating the analysis is incomplete) → Phase 1 → Phase 2 → Phase 3 → Next Steps for Resolution (NOT an implementation plan). Do NOT create any file in `./dev/plan/`.
+Produce the partial analysis: Executive Summary (stating the analysis is incomplete) → Phase 1 → Phase 2 → Phase 3 → Next Steps for Resolution (NOT an implementation plan). Do NOT create any file in `./spike/`.
 
 Begin the document with:
 
