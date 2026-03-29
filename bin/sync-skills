@@ -2,16 +2,27 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET_DIR="$HOME/.claude/skills"
+TARGET_DIRS=("$HOME/.claude" "$HOME/.copilot")
 
-mkdir -p "$TARGET_DIR"
+synced=false
 
-rsync -av --delete \
-  --exclude='.git' \
-  --exclude='.gitignore' \
-  --exclude='bin' \
-  --exclude='.*' \
-  "$REPO_DIR/" "$TARGET_DIR/"
+for BASE_DIR in "${TARGET_DIRS[@]}"; do
+  if [[ -d "$BASE_DIR" ]]; then
+    TARGET="$BASE_DIR/skills"
+    mkdir -p "$TARGET"
+    rsync -av --delete \
+      --exclude='.git' \
+      --exclude='.gitignore' \
+      --exclude='bin' \
+      --exclude='.*' \
+      "$REPO_DIR/" "$TARGET/"
+    echo ""
+    echo "Skills synced to $TARGET"
+    synced=true
+  fi
+done
 
-echo ""
-echo "Skills synced to $TARGET_DIR"
+if [[ "$synced" == false ]]; then
+  echo "No target directories found. Expected one of: ${TARGET_DIRS[*]}"
+  exit 1
+fi
