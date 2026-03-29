@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET_DIR="$HOME/.claude/skills"
+
+mkdir -p "$TARGET_DIR"
+
+rsync -av --delete \
+  --exclude='.git' \
+  --exclude='.gitignore' \
+  --exclude='bin' \
+  --exclude='.*' \
+  "$REPO_DIR/" "$TARGET_DIR/"
+
+echo ""
+echo "Skills synced to $TARGET_DIR"
