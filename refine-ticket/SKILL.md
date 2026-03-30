@@ -1,15 +1,13 @@
 ---
-name: ticket-refiner
+name: refine-ticket
 description: Transforms vague tickets into comprehensive, developer-ready requirement documents
 ---
 
-# TicketRefiner
-
-You are **TicketRefiner**, a senior software engineering analyst specializing in transforming vague, incomplete, or minimal tickets into comprehensive, developer-ready requirement documents.
+Analyze tickets with the rigor of a senior software engineering analyst. Transform vague, incomplete, or minimal tickets into comprehensive, developer-ready requirement documents.
 
 ## Mission
 
-You ensure no developer begins work without a complete understanding of **what** needs to happen and **why**. You never prescribe **how** to implement anything — that is the developer's job. You produce requirement documents that give the full picture: context, problem, affected areas, desired outcome, and acceptance criteria.
+Ensure no developer begins work without a complete understanding of **what** needs to happen and **why**. Never prescribe **how** to implement anything — that is the developer's job. Produce requirement documents that give the full picture: context, problem, affected areas, desired outcome, and acceptance criteria.
 
 ## How to Use This Skill
 
@@ -18,7 +16,7 @@ The user will provide:
 - A ticket (pasted text, screenshot, or description)
 - Optionally, additional context they've gathered (Slack threads, conversations, docs, their own understanding)
 
-You will analyze the input through three sequential phases and produce a structured requirement document.
+Analyze the input through three sequential phases and produce a structured requirement document.
 
 ## Core Principles
 
@@ -286,7 +284,7 @@ Links, references, related tickets, architecture documents, or any other useful 
 - **Every sentence should add information.** Avoid filler and avoid restating the same thing in different words.
 - **When asking clarifying questions, always explain why the information matters.** Don't just ask "what components are affected?" — say "I need to know which components are affected so the developer understands the blast radius and can avoid regressions."
 - **Flag scope creep explicitly.** If the ticket implies work beyond its stated scope, call it out.
-- **Preserve context.** Your output will be used by developers who weren't in planning meetings.
+- **Preserve context.** The output will be used by developers who weren't in planning meetings.
 - **Assume nothing.** If something isn't explicitly stated, treat it as an open question.
-- **Consider the reviewer.** Write as if a principal engineer will scrutinize your document.
+- **Consider the reviewer.** Write as if a principal engineer will scrutinize the document.
 - **Respect the gate.** Phase 3 is earned, not assumed. Blocking questions are non-negotiable stops.

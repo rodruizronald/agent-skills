@@ -1,11 +1,9 @@
 ---
-name: ticket-architect
+name: plan-ticket
 description: Analyzes tickets through assessment, codebase analysis, and implementation planning
 ---
 
-# TicketArchitect
-
-You are **TicketArchitect**, a senior software engineering analyst specializing in ticket assessment, codebase analysis, and implementation planning.
+Analyze tickets with the rigor of a principal engineer reviewing a design doc and the practicality of a developer who needs to ship. Assess requirements, map them against the codebase, surface open questions, and produce an implementation plan broken into atomic tasks.
 
 ## How to Use This Skill
 
@@ -14,7 +12,7 @@ The user will provide:
 - A ticket (pasted text, screenshot, or URL)
 - Optionally, relevant code files, architecture docs, or codebase context
 
-You will analyze the ticket through four sequential phases and produce a structured analysis document.
+Analyze the ticket through four sequential phases and produce a structured analysis document.
 
 ## Mission
 
@@ -24,8 +22,6 @@ Ensure no developer begins work on a ticket without a complete understanding of:
 - How the current codebase supports or conflicts with those requirements
 - What questions must be answered before work begins
 - What the implementation plan should look like, broken into atomic tasks
-
-Operate with the rigor of a principal engineer reviewing a design doc and the practicality of a developer who needs to ship.
 
 ## Core Principles
 
@@ -276,7 +272,7 @@ Produce the full analysis: Executive Summary (3–5 sentences) → Phase 1 → P
 
 End with two suggested next steps:
 
-- **"Start Implementation"**: "I can help implement this plan. I'll follow the task breakdown sequentially, starting with Task 1, referencing the specific files and changes identified."
+- **"Start Implementation"**: "I can help implement this plan, following the task breakdown sequentially, starting with Task 1, referencing the specific files and changes identified."
 - **"Create Tests First"**: "I can write the test cases first based on the testing strategy above, starting with P0 priority tests before any implementation."
 
 ### If ANY questions remain unresolved (blocking or non-blocking):
@@ -295,7 +291,7 @@ Questions requiring answers:
 1. [Q1] — Directed to: [role]
 2. [Q2] — Directed to: [role]
 
-Once resolved, provide the answers and I will complete the analysis with an implementation plan.
+Once resolved, provide the answers and the analysis will be completed with an implementation plan.
 ```
 
 ---
@@ -306,10 +302,10 @@ Once resolved, provide the answers and I will complete the analysis with an impl
 2. **Always show your work** — Reference specific files, line numbers, and code snippets from what the user has provided.
 3. **Be conservative with estimates** — When uncertain, estimate higher.
 4. **Flag scope creep** — If the ticket implies work beyond its stated scope, call it out.
-5. **Preserve context** — Your output will be used by developers who weren't in planning meetings.
+5. **Preserve context** — The output will be used by developers who weren't in planning meetings.
 6. **Assume nothing** — If something isn't explicitly stated, treat it as an open question.
 7. **Think in tests** — For every feature, immediately think "how would I test this?"
-8. **Consider the reviewer** — Write as if a senior engineer will scrutinize your analysis.
+8. **Consider the reviewer** — Write as if a senior engineer will scrutinize the analysis.
 9. **Respect the gate** — Phase 4 is earned, not assumed. Blocking questions are non-negotiable stops.
 
 ## Error Handling
