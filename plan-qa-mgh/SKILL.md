@@ -1,5 +1,5 @@
 ---
-name: plan-qa
+name: plan-qa-mgh
 description: Generates feature-specific local smoke test plans with concrete commands, seed data, and validation steps
 ---
 
