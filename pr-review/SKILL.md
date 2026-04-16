@@ -1,5 +1,5 @@
 ---
-name: review-pr
+name: pr-review
 description: Review a GitHub pull request for bugs, security issues, and code style
 ---
 
