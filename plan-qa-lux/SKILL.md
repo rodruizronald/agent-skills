@@ -61,6 +61,8 @@ This is the fixed stack. All guidance must reference these specifics.
 | PostgreSQL | admin   | admin    | commander | `psql -h localhost -p 5432 -U admin -d commander`    |
 | ClickHouse | default | (empty)  | default   | `docker exec commander-clickhouse clickhouse-client` |
 
+**Important:** All PostgreSQL tables are in the `commander` schema, not `public`. Queries must use the schema prefix (e.g., `commander.agent`, `commander.execution_plan`).
+
 ### Kafka Topics
 
 | Topic                                           | Purpose                      | Partitions |
@@ -567,6 +569,38 @@ If the feature involves multiple calls in sequence (e.g., create then query, or 
 
 If the feature involves the agent stream (non-gRPC interaction), explain what the real agent will do when it receives the command and what to watch for in agent logs.
 
+#### 5b: Validate Rejection Cases
+
+After the happy-path execution, include negative test cases that verify the feature's validation rules. These protect data integrity and ensure the API rejects invalid input with clear errors.
+
+**When to include this section:** If the feature adds or modifies validation (required fields, value constraints, authorization checks, state preconditions), include rejection cases. Skip this section only if the feature has no validation logic.
+
+**What to test:**
+
+- **Missing required fields**: Send requests with required fields omitted. Verify the server returns an error with a message identifying the missing field.
+- **Invalid values**: Send fields with out-of-range or invalid values (zero, negative, wrong type). Verify the server rejects with a specific error.
+- **State preconditions**: If the feature depends on prior state (e.g., agent must exist, plan must be in WAITING status), send requests that violate those preconditions.
+
+**Format:**
+
+For each rejection case, provide:
+
+1. The gRPC call with the invalid payload
+2. The expected error message or error code
+3. A brief explanation of why it should be rejected
+
+```bash
+# Example: Missing required field
+eval grpcurl -plaintext $CG_AUTH -d '{
+  "agent_id": "10000000-0000-0000-0000-000000000001",
+  "config": {}
+}' localhost:10001 clientgateway.v1.ClientGatewayService/UpdateAgent
+
+# Expected: Error - "operational_config is required when config is provided"
+```
+
+Keep this focused on the 3-5 most critical rejection cases, not an exhaustive matrix. Prioritize cases that would cause data corruption or silent failures if validation were missing.
+
 ---
 
 ### STEP 6: Validate Results
@@ -816,6 +850,9 @@ Present the guide as a numbered walkthrough with clear headers. Every command mu
 ### Step 5: Execute
 [grpcurl commands with full payloads and auth headers]
 
+### Step 5b: Validate Rejection Cases (if feature has validation)
+[gRPC calls with invalid payloads, expected error messages]
+
 ### Step 6: Validate
 #### 6.1 gRPC Response
 [expected response fields and values]
@@ -849,6 +886,7 @@ Ticket: _______________
 [ ] Client Gateway auth configured ($CG_AUTH)
 [ ] Prerequisite data verified
 [ ] Feature executed via gRPC
+[ ] Rejection cases validated (if applicable)
 [ ] gRPC response validated
 [ ] PostgreSQL state verified
 [ ] ClickHouse state verified (if applicable)
@@ -866,6 +904,6 @@ Ticket: _______________
 - **Read the code first.** Before generating the plan, read the relevant proto files, service implementations, and migrations to understand exactly what the feature does.
 - **Be explicit about what success looks like.** Don't just say "verify the response." Say "the response should contain `status: EXECUTION_PLAN_STATUS_SUCCESS` and all step details should show `status: EXECUTION_PLAN_STEP_DETAIL_STATUS_SUCCESS`."
 - **Respect distributed timing.** Some validations require waiting for async processing (Kafka consumption, agent execution). Indicate expected delays: "wait ~5 seconds for the agent to process the plan" or "allow ~10 seconds for Redpanda Connect to flush to ClickHouse."
-- **Keep it focused.** This is a smoke test for the happy path. Don't try to cover every edge case.
+- **Keep it focused.** This is primarily a smoke test for the happy path. Include the 3-5 most critical rejection cases (missing required fields, invalid values, state preconditions) when the feature has validation logic, but don't try to cover every edge case.
 - **One feature at a time.** Each invocation covers one feature. If the developer wants to test multiple features, run the skill separately for each.
 - **Use reflection.** When unsure about exact field names or types, use `grpcurl describe` to get the correct proto definitions rather than guessing.
