@@ -53,6 +53,50 @@ This is the fixed stack. All guidance must reference these specifics.
 
 ---
 
+## Database Audit Trigger
+
+The local database has an `audit_generic_trigger()` on most tables. This trigger fires on every `INSERT`, `UPDATE`, and `DELETE` and writes to `audit_offer_pricing.audit_<table_name>`. The trigger reads two PostgreSQL session-level settings:
+
+| Setting         | Purpose                                           |
+| --------------- | ------------------------------------------------- |
+| `audit.traceId` | Trace identifier (NOT NULL in the audit table)    |
+| `audit.context` | JSON context string (NOT NULL in the audit table) |
+
+The trigger reads these via `current_setting('audit.traceId', true)`. If they are not set, the values default to `NULL` and the audit `INSERT` fails with a `NOT NULL` constraint violation.
+
+### Required pattern for all manual SQL that modifies data
+
+Every `INSERT`, `UPDATE`, or `DELETE` must be wrapped in a transaction with `SET LOCAL` to provide the audit context:
+
+```sql
+BEGIN;
+SET LOCAL "audit.traceId" = 'smoke-test';
+SET LOCAL "audit.context" = '{"client_xid":"smoketest"}';
+
+-- Your DML statements here
+
+COMMIT;
+```
+
+**Key details:**
+
+- `SET LOCAL` scopes the setting to the current transaction only — it is automatically cleared on `COMMIT` or `ROLLBACK`.
+- `set_config('audit.traceId', 'value', true)` does NOT work across statements in the same session — it uses `is_local=true` which is transaction-scoped but the trigger uses `current_setting()` which may not see it depending on timing. Always prefer `SET LOCAL`.
+- The double quotes around `"audit.traceId"` are required because the setting name contains a dot.
+- This applies to **all** SQL in the smoke test plan: seed inserts, cleanup deletes, and any manual verification updates.
+
+### What happens if you forget
+
+```
+ERROR: null value in column "trace_id" of relation "audit_bundle_offer_offers" violates not-null constraint
+CONTEXT: SQL statement "INSERT INTO audit_offer_pricing.audit_bundle_offer_offers ..."
+PL/pgSQL function offer_pricing.audit_generic_trigger() line 13 at EXECUTE
+```
+
+If you see this error, it means the `SET LOCAL` block was missing or was outside the transaction.
+
+---
+
 ## Workflow
 
 ### STEP 0: Assess the Feature
@@ -95,6 +139,35 @@ If consumers or jobs are needed, include their start commands with an explanatio
 
 ---
 
+### STEP 1.5: Clean Previous Smoke Test Data
+
+**Always include this step before seeding.** The local database may contain leftover data from a previous smoke test run. Stale data causes FK violations, duplicate key errors, and misleading test results.
+
+Provide a cleanup script that removes any data this smoke test will create, wrapped in the audit transaction pattern:
+
+```sql
+BEGIN;
+SET LOCAL "audit.traceId" = 'smoke-cleanup';
+SET LOCAL "audit.context" = '{"client_xid":"smoketest"}';
+
+-- Delete in reverse FK dependency order
+-- Use LIKE 'SMOKE-%' or specific IDs — not just id >= 9000
+-- because previous runs may have created data with auto-generated IDs
+DELETE FROM offer_pricing.<child_table> WHERE <condition matching smoke data>;
+DELETE FROM offer_pricing.<parent_table> WHERE <condition matching smoke data>;
+
+COMMIT;
+```
+
+**Rules for cleanup queries:**
+
+- Delete from leaf tables first, then work up the FK chain to parent tables.
+- Use descriptive prefixes (e.g., `SMOKE-`, `SMOKE-OFF-`, `SMOKE-PVT-`) for all smoke test IDs so cleanup can target them with `LIKE` patterns. Avoid relying solely on numeric ranges (`id >= 9000`) — auto-generated IDs from API calls won't follow that convention.
+- When deleting bundle data, use subqueries to find related records: `WHERE bundle_offer_version_id IN (SELECT id FROM ... WHERE bundle_id LIKE 'SMOKE-%')`.
+- Make the cleanup idempotent — `DELETE` on an empty set is a no-op, so running it twice is safe.
+
+---
+
 ### STEP 2: Authenticate
 
 When running locally with `ENVIRONMENT=local` (the default in `variables.env`), the auth middleware accepts internal tokens that bypass JWT validation entirely. No IDM secret or token generation is required.
@@ -132,21 +205,47 @@ This is the most feature-specific step. Based on the assessment in Step 0:
 - Respect the foreign key dependency chain:
 
 ```
-products → product_offers → pricings → price_config_rulesets → price_config_ruleset_versions
-                                         ↓
-                                    bundle_offers → bundle_offer_offers
+products → offers → offers_pricing
+                       ↓
+price_config_rulesets → price_config_ruleset_versions → price_config_rules
+                       ↓
+bundle_offers → bundle_offer_versions → bundle_offer_offers
 ```
 
-- Use IDs in the 9000+ range to avoid collisions with migration seed data.
+- Use descriptive string prefixes for IDs: `SMOKE-OFF-A`, `SMOKE-PVT-MIX`, `smoke-pricing-a`. For integer IDs, use the 9000+ range.
+- **Wrap all INSERT statements in the audit transaction pattern** (see "Database Audit Trigger" section above).
+- Before writing INSERT statements, verify the table schema. Key tables have NOT NULL columns that aren't obvious:
+
+| Table      | Commonly forgotten NOT NULL columns                           |
+| ---------- | ------------------------------------------------------------- |
+| `products` | `product_xid`, `sponsor_product_team`, `format`, `consistent` |
+| `offers`   | `website_offer_enabled`, `notified_rms`                       |
+
 - Provide ready-to-run SQL `INSERT` statements with realistic test values relevant to the feature.
 - Include a note to check existing data first if the feature might work with data already seeded by migrations:
 
 ```bash
-psql -h localhost -p 5432 -U edoms -d offer_pricing_local
+PGPASSWORD=edoms psql -h localhost -p 5432 -U edoms -d offer_pricing_local
 ```
 
 ```sql
 SELECT * FROM offer_pricing.<table> LIMIT 10;
+```
+
+**Full seed template:**
+
+```sql
+BEGIN;
+SET LOCAL "audit.traceId" = 'smoke-seed';
+SET LOCAL "audit.context" = '{"client_xid":"smoketest"}';
+
+-- Insert in FK dependency order (parents first, children last)
+INSERT INTO offer_pricing.products (...) VALUES (...);
+INSERT INTO offer_pricing.offers (...) VALUES (...);
+INSERT INTO offer_pricing.offers_pricing (...) VALUES (...);
+-- etc.
+
+COMMIT;
 ```
 
 If the feature requires no seed data (e.g., it operates on data created by the API call itself), explicitly say so and explain why.
@@ -230,15 +329,37 @@ Tell the developer what the event payload should contain.
 
 ### STEP 6: Cleanup
 
-Provide SQL `DELETE` statements in reverse dependency order to remove the test data:
+Provide SQL `DELETE` statements in reverse dependency order to remove the test data. **Always wrap in the audit transaction pattern:**
 
 ```sql
--- Delete in reverse dependency order
-DELETE FROM offer_pricing.<child-table> WHERE <condition>;
-DELETE FROM offer_pricing.<parent-table> WHERE id >= 9000;
+BEGIN;
+SET LOCAL "audit.traceId" = 'smoke-cleanup';
+SET LOCAL "audit.context" = '{"client_xid":"smoketest"}';
+
+-- Delete in reverse FK dependency order
+-- Include data created by the API calls (use subqueries to find auto-generated IDs)
+DELETE FROM offer_pricing.bundle_offer_offers
+WHERE bundle_offer_version_id IN (
+  SELECT id FROM offer_pricing.bundle_offer_versions
+  WHERE bundle_id LIKE 'SMOKE-%'
+);
+DELETE FROM offer_pricing.bundle_offer_versions WHERE bundle_id LIKE 'SMOKE-%';
+DELETE FROM offer_pricing.bundle_offers WHERE id LIKE 'SMOKE-%';
+
+DELETE FROM offer_pricing.offers_pricing WHERE offer_id LIKE 'SMOKE-%';
+DELETE FROM offer_pricing.offers WHERE id LIKE 'SMOKE-%';
+DELETE FROM offer_pricing.products WHERE id >= 9000;
+
+COMMIT;
 ```
 
 Or recommend `make fs` if a full reset is simpler.
+
+Also clean up temp files:
+
+```bash
+rm -f /tmp/<feature>-request.json /tmp/<feature>-response.json
+```
 
 ---
 
@@ -264,11 +385,14 @@ Present the guide as a numbered walkthrough with clear headers. Every command mu
 ### Step 1: Start the Stack
 [commands + explanation]
 
+### Step 1.5: Clean Previous Smoke Data
+[cleanup SQL wrapped in audit transaction]
+
 ### Step 2: Authenticate
 [token usage commands]
 
 ### Step 3: Seed Test Data
-[SQL statements]
+[SQL statements wrapped in audit transaction]
 
 ### Step 4: Execute
 [curl commands]
@@ -277,13 +401,14 @@ Present the guide as a numbered walkthrough with clear headers. Every command mu
 [jq commands, SQL queries, log guidance, event checks]
 
 ### Step 6: Cleanup
-[SQL deletes or make fs]
+[SQL deletes wrapped in audit transaction, or make fs]
 
 ### Checklist
 Feature: _______________
 Branch: _______________
 
 [ ] Stack started
+[ ] Previous smoke data cleaned
 [ ] Consumers/jobs started (if needed)
 [ ] Prerequisite data seeded
 [ ] Authenticated with internal token
@@ -304,3 +429,6 @@ Branch: _______________
 - **Respect the dependency chain.** Never provide seed SQL that violates foreign key constraints.
 - **Keep it focused.** This is a smoke test for the happy path. Don't try to cover every edge case — that's what unit and integration tests are for.
 - **One feature at a time.** Each invocation of this skill covers one feature. If the developer wants to test multiple features, run the skill separately for each.
+- **Always use the audit transaction pattern.** Every SQL block that modifies data (`INSERT`, `UPDATE`, `DELETE`) must be wrapped in `BEGIN; SET LOCAL "audit.traceId" = '...'; SET LOCAL "audit.context" = '...'; ... COMMIT;`. No exceptions.
+- **Verify table schemas before writing INSERTs.** Check for NOT NULL columns that aren't obvious. The `products` and `offers` tables are common offenders.
+- **Use LIKE patterns for cleanup, not just numeric ranges.** API calls generate auto-incremented IDs that won't fall in the 9000+ range. Use descriptive prefixes for all smoke test string IDs and `LIKE 'SMOKE-%'` in cleanup queries.
