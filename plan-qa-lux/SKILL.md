@@ -37,12 +37,12 @@ This is the fixed stack. All guidance must reference these specifics.
 
 ### Services
 
-| Service        | Port  | Protocol | Description                                                  |
-| -------------- | ----- | -------- | ------------------------------------------------------------ |
-| Client Gateway | 10001 | gRPC     | Client-facing API for agents, execution plans                |
-| Agent Gateway  | 10000 | gRPC     | Agent connections, bidirectional streaming                   |
-| Data Collector | 9090  | gRPC     | Metrics, configs, events ingestion from agents               |
-| Agent          | N/A   | gRPC     | Runs locally via `make dev-agent`, connects to Agent Gateway |
+| Service        | Port  | Protocol | Description                                                                                                                             |
+| -------------- | ----- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Client Gateway | 10001 | gRPC     | Client-facing API for agents, execution plans                                                                                           |
+| Agent Gateway  | 10000 | gRPC     | Agent connections, bidirectional streaming                                                                                              |
+| Data Collector | 9090  | gRPC     | Metrics, configs, events ingestion from agents                                                                                          |
+| Agent          | N/A   | gRPC     | Runs either in docker-compose (fake-miners workflow) or on host via `make dev-agent` (real-miners workflow). Connects to Agent Gateway. |
 
 ### Infrastructure
 
@@ -76,36 +76,73 @@ This is the fixed stack. All guidance must reference these specifics.
 | `commander.agent-gateway.agent-restart`         | Agent restart commands       | 1          |
 | `commander.agent-gateway.agent-logs-upload`     | Log upload requests          | 1          |
 
-### Real Agent (Local Dev)
+### Agent Runtime Options
 
-The real agent (`cmd/agent`) runs the full agent codebase locally via `make dev-agent`. It connects to Agent Gateway, authenticates, and runs all components (collectors, scanner, execution plan handler, etc.).
+Commander has two supported local-dev workflows for running the Agent. The choice depends on **what you need the miners to be**.
 
-**Setup**: Edit `dev-resources/agent/agent.config.toml` to match a seeded agent:
+#### Workflow A: Docker-compose + fake miners (default for local QA)
 
-```toml
-AgentId = "10000000-0000-0000-0000-000000000001"
-AgentSecret = "quetal"
-```
+The Agent runs in docker-compose under the `fake-miners` profile alongside TWO fake-miner containers — one per firmware (`fake-miners-luxos`, `fake-miners-microbt`). They impersonate LuxOS and MicroBT miners at the wire-protocol level with deterministic fixture responses.
 
-The agent will scan IPs from `dev-resources/agent/ips.json`. Without real miners, collectors will run but find nothing — this is expected for testing config propagation, interval changes, and other agent-side logic.
+- **Start**: `make fake-miners-up` (= `docker compose --profile fake-miners up -d`)
+- **Stop**: `make fake-miners-down`
+- **Logs**: `make fake-miners-logs` (or `docker logs agent -f`, `docker logs fake-miners-luxos -f`, `docker logs fake-miners-microbt -f`)
+- **Assert SYS-911-shape wiring**: `make fake-miners-verify`
+- **Config paths**: `dev-resources/agent/agent.config.toml` (mounted as `/app/agent.config.toml` in the container; edited for docker networking — `AgentGateway.GRPC.Host = "agent-gateway"`, `DataCollector.GRPC.Host = "data-collector"`, short intervals like `10s` for fast feedback). There is NO `agent.config.dev.toml` variant; the single production config file gets edited in place.
+- **Agent credentials**: `AgentId = "10000000-0000-0000-0000-000000000001"`, `AgentSecret = "quetal"` (same seeded creds as host workflow)
+- **Miners**: each fake-miners container has a static bridge IP (`172.28.100.10` for LuxOS, `172.28.100.11` for MicroBT). LuxOS container serves port 4028 only; MicroBT container serves port 4028 (cgminer-style for OS detection) AND port 4433 (native MicroBT protocol for config collection). Fixtures are hand-authored in `dev-resources/fake-miners/`.
+- **IP list / networks — how they get there**: the agent's IP list is driven by the Agent Gateway, which reads `commander.agent.networks` from PostgreSQL and streams it to the agent on login. `./ips.json` at the repo root is a LOCAL CACHE populated by the gateway stream — **do NOT edit it directly**, the gateway overwrites it on every agent login. To configure the fake-miners network for the test agent, the seed file `dev-resources/data-collector/postgres/create_mock_registries.sql` already contains: `networks = '{"networks":[{"name":"fake-miners","ip_list":["172.28.100.10","172.28.100.11"]}]}'` for `test-agent-001`. This persists across `docker compose down -v`.
+- **Safety**: `172.28.0.0/16` is the compose bridge subnet — those IPs have no external route, so even with VPN enabled the packets stay inside the bridge. Non-static services on the bridge get auto-assigned IPs starting around `172.28.0.x`; reserve `172.28.100.x` for fake miners to avoid collisions.
+
+Use this workflow when:
+
+- Testing config/stats/events collection paths with predictable results
+- Verifying ClickHouse ingestion for miner data
+- Testing agent-side logic that reacts to specific miner responses (serial numbers, pool config, temperature thresholds, etc.)
+- You want a fast, offline, deterministic dev loop
+
+Reference: `spike/FAKE_MINERS_LOCAL_TESTING.md`, `dev-resources/fake-miners/README.md`.
+
+#### Workflow B: Host air + real miners (VPN)
+
+The Agent runs on the host via air hot-reload. Infrastructure + other services remain in docker-compose. Agent talks to real miners over the corporate VPN.
+
+- **Start**: infrastructure via `docker compose up -d` (no `fake-miners` profile), then `make dev-agent` on host
+- **Stop**: `Ctrl+C` the air process, `docker compose down` for infra
+- **Logs**: the air process stdout in the terminal
+- **Config paths**: `dev-resources/agent/agent.config.toml` (edited in place on host — `Host = "localhost"` or `"0.0.0.0"` so the agent binary reaches the gateway via Docker Desktop's port-forward)
+- **IP list / networks**: same rule as Workflow A — the gateway (via PG `commander.agent.networks`) is authoritative. Editing `./ips.json` at the host is futile; the gateway overwrites it on login. To set real miner IPs, use **Client Gateway `UpdateAgent` gRPC** (production-correct; publishes Kafka event the gateway consumes) OR a direct `UPDATE commander.agent SET networks = ...` SQL (transient: lost on `docker compose down -v` and immediately overwritten if the agent is already running).
+- **Miners**: whatever real IPs are set in PG `networks` for the test agent, reachable via VPN.
+
+Use this workflow when:
+
+- Testing against real firmware responses (known-bad payloads, new model types)
+- Validating miner-side side effects of execution plans (pool changes, power changes, reboots)
+- Reproducing a bug reported in staging/prod that requires real hardware
+
+**Rule**: `commander.agent.networks` is the single source of truth for what the agent scans. Never treat `ips.json` as authoritative — it's a runtime cache the gateway overwrites on login. Configure via `create_mock_registries.sql` (seed), `UpdateAgent` gRPC (runtime, production-correct), or a direct `UPDATE` against PG (transient, test-only).
 
 ### Key Commands
 
-| Action                    | Command                    |
-| ------------------------- | -------------------------- |
-| Start full stack          | `docker compose up -d`     |
-| Stop full stack           | `docker compose down`      |
-| Hot-reload Agent Gateway  | `make dev-agentgateway`    |
-| Hot-reload Client Gateway | `make dev-clientgateway`   |
-| Hot-reload Data Collector | `make dev-data-collector`  |
-| Hot-reload Agent          | `make dev-agent`           |
-| PostgreSQL migrations     | `make pg-deploy`           |
-| ClickHouse migrations     | `make ch-deploy`           |
-| List Kafka topics         | `make redpanda-topic-list` |
-| ClickHouse CLI            | `make clickhouse`          |
-| Unit tests                | `make test`                |
-| Integration tests         | `make test-integration`    |
-| All checks                | `make check`               |
+| Action                                 | Command                    |
+| -------------------------------------- | -------------------------- |
+| Start infra + server services          | `docker compose up -d`     |
+| Stop the stack                         | `docker compose down`      |
+| Start fake-miners + agent (Workflow A) | `make fake-miners-up`      |
+| Stop fake-miners + agent               | `make fake-miners-down`    |
+| Tail fake-miners + agent logs          | `make fake-miners-logs`    |
+| Assert SYS-911-shape wiring            | `make fake-miners-verify`  |
+| Hot-reload Agent (Workflow B, host)    | `make dev-agent`           |
+| Hot-reload Agent Gateway               | `make dev-agentgateway`    |
+| Hot-reload Client Gateway              | `make dev-clientgateway`   |
+| Hot-reload Data Collector              | `make dev-data-collector`  |
+| PostgreSQL migrations                  | `make pg-deploy`           |
+| ClickHouse migrations                  | `make ch-deploy`           |
+| List Kafka topics                      | `make redpanda-topic-list` |
+| ClickHouse CLI                         | `make clickhouse`          |
+| Unit tests                             | `make test`                |
+| Integration tests                      | `make test-integration`    |
+| All checks                             | `make check`               |
 
 ---
 
@@ -241,7 +278,7 @@ Detail: WAITING -> SUCCESS / FAILED / CANCELED
 
 **miner_metric_5min_agg**: Pre-aggregated 5-minute rollup with averages.
 
-**miner**: Config snapshot (latest state). Network config, pool configs (9 pools), OS type, reachability.
+**miner**: Config snapshot (latest state). Network config, pool configs (9 pools), OS type, reachability, `serial_number` (nullable, populated by LuxOS + MicroBT readers).
 
 **miner_event**: Event log with event_type, event_data (JSON), severity (info/warning/error).
 
@@ -282,6 +319,32 @@ Detail: WAITING -> SUCCESS / FAILED / CANCELED
 
 ---
 
+## Known Gotchas (from real smoke runs)
+
+These are traps that have bitten us in actual smoke testing. Reference them when drafting plans and when someone's test fails in a way that matches the symptom.
+
+1. **Don't use hostnames in `ip_list` — use static IPs.** The Agent's `mineriprepository.ipToUint32` sort comparator calls `net.ParseIP(entry).To4()` and dereferences the result. Hostnames parse to `nil` and panic the Agent once there are ≥2 entries. Always use static bridge IPs (e.g. `172.28.100.x`) for fake-miners networks.
+
+2. **OS detection races 3 workers on port 4028.** `getCGMinerOS`, `getMicroBTOS`, `getVnishOS` run in parallel; first recognized firmware wins. This means ONE IP cannot simultaneously simulate two firmwares. Each firmware needs its own container with its own IP. The `fake-miners-luxos` + `fake-miners-microbt` split in docker-compose is specifically for this reason.
+
+3. **cgminer protocol has two response shapes, single vs multi-command.** Single command (`"version"`): flat response `{"STATUS":[...],"VERSION":[...]}`. Multi command (`"version+config"`): wrapped response `{"version":[{...}],"config":[{...}]}`. The Agent's OS-detection uses single; `GetConfig` uses multi. Any fake miner simulator must handle BOTH shapes.
+
+4. **Agent login requires an injected version.** If the Agent binary is built without `-ldflags "${GOLDFLAGS}"` (which injects `buildinfo.version`), the gateway rejects login with `"missing agent version"`. `.air.agent.toml` invokes `make dev-build-app-agent` for this reason. Plain `go build` in a dev air config will break authentication.
+
+5. **The agent writes its local state back to PG on login.** If the agent's local `ips.json` is empty and the gateway sends down whatever PG has, the agent will overwrite PG with its own (possibly empty) view. Net effect: if you `UPDATE commander.agent SET networks = ...` while the agent is running, the update is gone by the next heartbeat. Always update PG networks with the agent stopped, OR use Client Gateway `UpdateAgent` gRPC (which publishes a Kafka event the gateway consumes and distributes correctly).
+
+6. **`create_mock_registries.sql` only runs on PG volume init.** `docker compose up -d` on an existing volume won't re-seed. To get seed changes picked up: `docker compose down -v` + `up -d`.
+
+7. **Default `docker compose up -d` does NOT start fake-miners or data-producer.** Both are under opt-in profiles (`fake-miners` and `synthetic` respectively). This is intentional so default compose runs stay clean.
+
+8. **`data-consumer` is dead code.** It references `./dev-resources/data-collector/consumer/main.go` which doesn't exist. Gated under `profiles: [synthetic]` so it only runs if you explicitly enable that profile, and it'll crash-loop if you do. Ignore the `Restarting (1)` status unless you intentionally enabled `synthetic`.
+
+9. **`data-producer` pollutes miner-data tables under the same test agent id.** If left running, it injects synthetic config rows for `test-agent-001` (and other seeded agents) in `miner`, `miner_metric`, `miner_event` — your fake-miner validation sees mixed rows. Keep it disabled (default) unless a feature specifically needs synthetic volume.
+
+10. **Bridge IP auto-assignment order matters.** Services without a static `ipv4_address` claim IPs sequentially from the start of the subnet. If 172.28.0.10 is taken by the time fake-miners tries to claim it, you'll get `Address already in use`. Mitigation: put static fake-miner IPs in a reserved range like `172.28.100.x`, not the low end of the subnet.
+
+---
+
 ## Workflow
 
 ### STEP 0: Assess the Feature
@@ -293,8 +356,8 @@ Before producing any testing steps, analyze what the feature involves:
 - **What database tables does it read from or write to?** (PostgreSQL and/or ClickHouse)
 - **Does it publish or consume Kafka events?** (which topics)
 - **Does it involve the agent stream?** (bidirectional streaming messages)
-- **Does it require a connected agent?** (real agent via `make dev-agent`)
-- **Does it require miners?** (real miners not available locally, but agent-side logic can still be tested)
+- **Does it require a connected agent?**
+- **Does it require miners to actually respond?** (if yes, use Workflow A with fake-miners unless specific hardware behavior is needed)
 - **What prerequisite data must exist?** (agents registered, miners discovered)
 - **What is the happy-path scenario end to end?**
 
@@ -309,83 +372,120 @@ If you still cannot determine the full flow, ask the developer before proceeding
 
 Based on this assessment, determine which components need to be running:
 
-| Component                     | Start if...                                                                                                                                |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Docker infrastructure         | Always (PostgreSQL, ClickHouse, Redpanda)                                                                                                  |
-| Client Gateway                | Feature involves client-facing API                                                                                                         |
-| Agent Gateway                 | Feature involves agent communication or execution plans                                                                                    |
-| Data Collector                | Feature involves metrics, configs, or events collection                                                                                    |
-| Real Agent (`make dev-agent`) | Feature involves agent-side logic (collectors, config manager, scanner, execution plan handler) or needs a connected agent for e2e testing |
-| Redpanda Connect              | Feature involves data flowing to ClickHouse via Kafka                                                                                      |
+| Component                        | Start if...                                                                                                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Docker infrastructure            | Always (PostgreSQL, ClickHouse, Redpanda)                                                                                                                                       |
+| Client Gateway                   | Feature involves client-facing API                                                                                                                                              |
+| Agent Gateway                    | Feature involves agent communication or execution plans                                                                                                                         |
+| Data Collector                   | Feature involves metrics, configs, or events collection                                                                                                                         |
+| Agent + fake-miners (Workflow A) | Feature involves agent-side logic AND wants deterministic miner responses (config/stats/events collection, serial_number wiring, pool changes, etc.) — **default for local QA** |
+| Agent on host (Workflow B)       | Feature specifically needs real firmware responses (new model parsing, real miner side effects) — requires VPN + real IPs in `ips.json`                                         |
+| Redpanda Connect                 | Feature involves data flowing to ClickHouse via Kafka                                                                                                                           |
 
-**IMPORTANT: Always use the real agent** (`cmd/agent` via `make dev-agent`) for QA testing. It runs the full agent codebase including ConfigurationManager, collectors, scanner, and execution plan handler. Requires editing `dev-resources/agent/agent.config.toml` to match a seeded agent (see Step 1). Do NOT use the agent mock (`dev-resources/commander-server/agent-mock/`) as it is a standalone program that fakes the gRPC stream with canned responses and does not run any real agent code.
+**IMPORTANT**: Always use the real Agent binary (`cmd/agent`) — whether via Workflow A or B. Do NOT use the agent mock (`dev-resources/commander-server/agent-mock/`) for feature QA; that mock is a standalone program that fakes the gRPC stream with canned responses and does not exercise the real agent codebase.
+
+Decide between Workflow A and B based on **what the miners need to be**:
+
+- **Workflow A (fake-miners)** — miner responses are deterministic fixtures. Covers config/stats/events collection end-to-end. No VPN, no real hardware. Best for ~90% of local QA.
+- **Workflow B (host + real miners)** — requires corporate VPN and `ips.json` with real miner IPs. Use only when the feature specifically depends on real firmware responses.
 
 ---
 
 ### STEP 1: Start the Stack
 
-Recommend the appropriate startup based on the feature:
+Recommend the appropriate startup based on the feature and chosen workflow.
 
-**Full stack (most common for e2e tests):**
+#### 1a. Reset to a clean state (recommended for first-time smoke of a feature)
+
+A smoke test gives the cleanest signal from a known-clean starting point. Stale state from prior dev sessions poisons results: old `miner`/`miner_event`/etc. rows with wrong values, cached `miners.dev.json` inside the agent container, stale Kafka offsets, pre-existing DLQ retry noise, un-applied migrations.
+
+Offer the developer two paths and tell them to pick one:
+
+**Strict fresh-start (default; add ~2 min; recommended for first-time validation):**
 
 ```bash
-# Start all infrastructure and services
+# Tear down everything including volumes (wipes Postgres, ClickHouse, Redpanda, agent/fake-miners state)
+docker compose down -v
+
+# Bring infra + server services back up fresh (*-init services re-apply migrations from zero)
+docker compose up -d
+```
+
+Guarantees: no stale rows in any DB, no leftover Kafka offsets, no cached agent state, migrations re-applied from scratch, Redpanda Connect consumes from a clean position.
+
+**Targeted reset (faster; for subsequent runs when you know the rest of the stack is healthy):**
+
+Include only the targeted commands relevant to the feature under test. Examples:
+
+```bash
+# Drop fake-miners + agent containers (also drops in-container caches like miners.dev.json)
+make fake-miners-down
+
+# Clear test-agent rows from ClickHouse tables the feature touches
+docker exec commander-clickhouse clickhouse-client -q "
+ALTER TABLE <table> DELETE WHERE agent_id = '<test-agent-uuid>' SETTINGS mutations_sync = 1;
+"
+
+# If the feature writes to PostgreSQL tables, add scoped DELETE here.
+```
+
+Tell the developer: "If in doubt, go strict." Then continue with 1b.
+
+#### 1b. Start infrastructure + server services (both workflows)
+
+```bash
+# Start infrastructure and server-side services
 docker compose up -d
 
 # Verify services are running
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep commander
 ```
 
-**Infrastructure only (when running services locally with hot-reload):**
-
-```bash
-# Start infrastructure
-docker compose up -d commander-postgres commander-clickhouse commander-redpanda-0
-
-# Wait for initialization
-docker compose up -d commander-postgres-init commander-clickhouse-init commander-redpanda-init commander-schema-registry-init
-
-# Start services with hot-reload (separate terminals)
-make dev-clientgateway    # Terminal 1
-make dev-agentgateway     # Terminal 2
-make dev-data-collector   # Terminal 3
-```
-
 **If schema changes are involved:**
 
 ```bash
-# Apply PostgreSQL migrations
-make pg-deploy
-
-# Apply ClickHouse migrations
-make ch-deploy
+make pg-deploy      # PostgreSQL migrations
+make ch-deploy      # ClickHouse migrations
 ```
 
-Always include the gRPC health check:
+Health-check the gateways:
 
 ```bash
 grpcurl -plaintext localhost:10001 list
 grpcurl -plaintext localhost:10000 list
 ```
 
-**If the real agent is needed** (testing agent-side logic):
-
-First, update `dev-resources/agent/agent.config.toml` to use a seeded agent's credentials:
-
-```toml
-AgentId = "10000000-0000-0000-0000-000000000001"
-AgentSecret = "quetal"
-```
-
-Then start the agent:
+#### 1c-A. Workflow A: start the Agent + fake-miners in docker-compose
 
 ```bash
-make dev-agent  # Hot-reload mode
+make fake-miners-up
 ```
 
-The agent will connect to Agent Gateway, authenticate via Basic Auth (bcrypt-verified against PostgreSQL), and start all components (collectors, scanner, heartbeat, etc.). The `.air.agent.toml` injects a dev version (`0.0.0-dev`) via ldflags so the Agent Gateway accepts the login. Collectors will attempt to scan IPs in `dev-resources/agent/ips.json` — they won't find real miners, but that's fine for testing config propagation, interval changes, and other agent-side logic.
+This starts three services (all gated by `profiles: [fake-miners]`): `agent`, `fake-miners-luxos` (172.28.100.10), `fake-miners-microbt` (172.28.100.11). The Agent is configured via `dev-resources/agent/agent.config.toml` (mounted as `/app/agent.config.toml`) with seeded credentials (`10000000-0000-0000-0000-000000000001` / `quetal`). Its IP list comes from `commander.agent.networks` in PostgreSQL, which is seeded by `create_mock_registries.sql` to `{"networks":[{"name":"fake-miners","ip_list":["172.28.100.10","172.28.100.11"]}]}` for `test-agent-001`. On agent login, the gateway streams that list down, the agent writes it to `./ips.json` (cache), the scanner probes both IPs, OS-detection identifies each, and the appropriate reader collects config from each.
 
-Verify the agent connected:
+Verify the agent started cleanly:
+
+```bash
+docker logs agent --tail 30 | grep -iE "ip-repository|connecting to agent gateway|created bidirectional stream"
+```
+
+Expect:
+
+- `loaded IPs from file system ... count:1` (the fake-miners service name)
+- `connecting to agent gateway address:agent-gateway:10000`
+- `created bidirectional stream`
+
+Verify the fake-miners listeners:
+
+```bash
+docker logs fake-miners-luxos --tail 10 | grep "listener ready"
+docker logs fake-miners-microbt --tail 10 | grep "listener ready"
+```
+
+Expect on `fake-miners-luxos`: one line `firmware:luxos port:4028`.
+Expect on `fake-miners-microbt`: two lines — `firmware:microbt port:4028` (cgminer detection only) and `firmware:microbt port:4433` (native protocol).
+
+Verify the agent is registered as connected at the gateway:
 
 ```bash
 grpcurl -plaintext \
@@ -393,7 +493,32 @@ grpcurl -plaintext \
   localhost:10000 agentgateway.v1.AgentGatewayService/GetConnectedAgents
 ```
 
-**Seeded agent credentials** (all 31 agents use the same token):
+#### 1c-B. Workflow B: start the Agent on host with real miners
+
+Requires corporate VPN to be up.
+
+Edit `dev-resources/agent/agent.config.toml` to use seeded credentials:
+
+```toml
+AgentId = "10000000-0000-0000-0000-000000000001"
+AgentSecret = "quetal"
+```
+
+Configure the test agent's networks via Client Gateway `UpdateAgent` gRPC with the real miner IPs (production-correct, publishes a Kafka event the gateway consumes). For quick-and-dirty local runs, you can also do a direct PG `UPDATE commander.agent SET networks = '{"networks":[{"name":"prod","ip_list":["10.206.0.31","10.206.0.34"]}]}'::jsonb WHERE id = '...'` — but only while the agent is stopped, and know it will be wiped on `docker compose down -v`. Editing `./ips.json` directly does nothing, because the gateway overwrites it on login. **Never commit real IPs anywhere.**
+
+Start the agent:
+
+```bash
+make dev-agent
+```
+
+The `.air.agent.toml` injects a dev version (`0.0.0-dev`) via ldflags so the Agent Gateway accepts the login. Collectors will poll the real miners and populate the backend as they do in production.
+
+Verify connection via the same `GetConnectedAgents` call above.
+
+---
+
+**Seeded agent credentials** (all 31 agents use the same token — applies to both workflows):
 
 - Plaintext token: `quetal`
 - Bcrypt hash in DB: `$2a$12$yEz275yskCgUGT64IDrr8exu3FN0U3pJGMWZ829QHJgJmOHafmQV.`
@@ -448,13 +573,20 @@ eval grpcurl -plaintext $CG_AUTH -d '{"site_ids": []}' \
   localhost:10001 clientgateway.v1.ClientGatewayService/GetAgents
 ```
 
-#### 3.2 Check agent is connected (if real agent is running)
+#### 3.2 Check agent is connected
+
+Gateway-side (both workflows):
 
 ```bash
 grpcurl -plaintext \
   -H "Authorization: Basic $(echo -n '10000000-0000-0000-0000-000000000001:quetal' | base64)" \
   localhost:10000 agentgateway.v1.AgentGatewayService/GetConnectedAgents
 ```
+
+Agent-side:
+
+- Workflow A: `docker logs agent -f --tail 50` — look for `created bidirectional stream` and no `authentication failed` errors.
+- Workflow B: read the air terminal output — same signal, in the terminal where you ran `make dev-agent`.
 
 #### 3.3 Check PostgreSQL state
 
@@ -507,12 +639,11 @@ eval grpcurl -plaintext $CG_AUTH -d '{
 }' localhost:10001 clientgateway.v1.ClientGatewayService/CreateAgent
 ```
 
-If the feature requires miner data in ClickHouse and the data producer is not running:
+**Miner data in ClickHouse**:
 
-```bash
-# Start data producer (generates synthetic miner data)
-docker compose up -d data-producer
-```
+- Workflow A: real miner-shaped data will land in ClickHouse automatically once the agent starts polling the fake-miners service. Wait one scan interval (default in `agent.config.toml` is 300s; the fake-miners dev config typically reduces it to 10-30s) and the `miner` table will have rows for the fake LuxOS and MicroBT miners.
+- Workflow B: real miner data lands naturally when collecting from real miners over VPN.
+- If you need synthetic data unrelated to miner polling, enable the data producer via its opt-in profile: `docker compose --profile synthetic up -d data-producer`. Default `docker compose up` does not start it, so it cannot contaminate fake-miners tests with synthetic rows.
 
 If the feature requires no seed data (e.g., it operates on data created by the gRPC call itself), explicitly say so and explain why.
 
@@ -567,7 +698,9 @@ eval grpcurl -plaintext $CG_AUTH -d '{
 
 If the feature involves multiple calls in sequence (e.g., create then query, or create then cancel), provide each one in order with a brief explanation of what it's doing and what to expect.
 
-If the feature involves the agent stream (non-gRPC interaction), explain what the real agent will do when it receives the command and what to watch for in agent logs.
+If the feature involves the agent stream (non-gRPC interaction), explain what the agent will do when it receives the command and what to watch for in agent logs (docker-agent logs via `docker logs agent`, host-agent logs in the air terminal).
+
+**Workflow-A-specific note on execution plans**: fake miners do not side-effect on write commands (pool changes, reboots, firmware installs) — they respond with benign acknowledgements. Execution plan STEPS that only exercise the config-write proto contract will still SUCCESS at the detail level, but the fake miner's responses on subsequent read commands will not reflect those changes (fixtures are static). If the feature tests actual write-effect correctness on the miner, use Workflow B instead.
 
 #### 5b: Validate Rejection Cases
 
@@ -656,15 +789,15 @@ Tell the developer what the expected results should look like (e.g., "all detail
 docker exec commander-clickhouse clickhouse-client -q "
 SELECT agent_id, miner_id, timestamp, hashrate_5s, power
 FROM miner_metric
-WHERE agent_id = '63054fa2-0000-0000-0000-000000000001'
+WHERE agent_id = '10000000-0000-0000-0000-000000000001'
 ORDER BY timestamp DESC LIMIT 5;
 "
 
-# Check miner configs
+# Check miner configs (includes serial_number as of SYS-911)
 docker exec commander-clickhouse clickhouse-client -q "
-SELECT miner_id, os_type, pool_1_1_url, ip_address
+SELECT miner_id, os_type, serial_number, pool_1_1_url, ip_address
 FROM miner
-WHERE agent_id = '63054fa2-0000-0000-0000-000000000001'
+WHERE agent_id = '10000000-0000-0000-0000-000000000001'
 LIMIT 5;
 "
 
@@ -672,10 +805,12 @@ LIMIT 5;
 docker exec commander-clickhouse clickhouse-client -q "
 SELECT miner_id, event_type, severity, timestamp
 FROM miner_event
-WHERE agent_id = '63054fa2-0000-0000-0000-000000000001'
+WHERE agent_id = '10000000-0000-0000-0000-000000000001'
 ORDER BY timestamp DESC LIMIT 10;
 "
 ```
+
+**Workflow A shortcut**: `make fake-miners-verify` asserts the baseline (non-NULL serial_number rows in `miner`). If your feature adds a new miner-level column, extend that target or run a bespoke SELECT.
 
 #### 6.4 Kafka Events (if applicable)
 
@@ -697,13 +832,23 @@ Tell the developer what to look for in the service logs:
 
 ```bash
 # Agent Gateway logs
-docker logs commander-agent-gateway --tail 50
+docker logs agent-gateway --tail 50
 
 # Client Gateway logs
-docker logs commander-client-gateway --tail 50
+docker logs client-gateway --tail 50
 
 # Data Collector logs
-docker logs commander-data-collector --tail 50
+docker logs data-collector --tail 50
+
+# Agent logs (Workflow A)
+docker logs agent --tail 50
+
+# Fake-miners logs (Workflow A, for wire-level sanity checks)
+docker logs fake-miners-luxos --tail 50
+docker logs fake-miners-microbt --tail 50
+
+# Redpanda Connect for miner configs (useful if serial/config fields look wrong)
+docker logs commander-redpanda-connect-miner --tail 50
 ```
 
 Specify:
@@ -712,13 +857,17 @@ Specify:
 - Warnings that are expected vs. unexpected
 - Errors that would indicate a problem
 
-#### 6.6 Real Agent Behavior (if applicable)
+#### 6.6 Agent Behavior (if applicable)
 
-If the real agent is running (`make dev-agent`), explain:
+Explain:
 
 - What the agent should do when it receives the command (e.g., config update, execution plan)
-- What log output to expect from the agent terminal
+- What log output to expect and where to find it:
+  - **Workflow A**: `docker logs agent -f`
+  - **Workflow B**: the air terminal where `make dev-agent` is running
 - What internal state changes to look for (e.g., ConfigurationManager updated, collection interval reset, scanner restarted)
+
+For features that exercise the miner-read path (config/stats/events), also tell the developer what fixture response the fake miner is returning (Workflow A) or what the real miner should report (Workflow B).
 
 ---
 
@@ -750,11 +899,19 @@ DELETE FROM agents WHERE name LIKE '%QA Test%';
 "
 ```
 
-Or recommend a full reset:
+**Tear down the agent + fake-miners** (Workflow A):
+
+```bash
+make fake-miners-down
+```
+
+**Or recommend a full reset:**
 
 ```bash
 docker compose down -v && docker compose up -d
 ```
+
+If you were on Workflow B, also `Ctrl+C` the air terminal and revert any changes to `dev-resources/agent/agent.config.toml` (the docker `Host` overrides ↔ host `localhost`/`0.0.0.0`) before committing. There is no need to revert `./ips.json` — it's a runtime cache, not committed.
 
 ---
 
@@ -833,19 +990,23 @@ Present the guide as a numbered walkthrough with clear headers. Every command mu
 - ClickHouse tables: [list, if any]
 - Kafka topics: [list, if any]
 - Agent stream messages: [list, if any]
-- Real agent needed: [yes/no]
+- Agent workflow: [A (fake-miners) | B (host + real miners) | not needed]
+- Rationale for workflow choice: [why A or B fits this feature]
 
 ### Step 1: Start the Stack
-[commands + explanation of which services are needed and why]
+[1a. Reset (strict `docker compose down -v` vs. targeted reset — pick one based on first-run vs. repeat)]
+[1b. Infrastructure + server services]
+[1c-A or 1c-B. Agent startup per chosen workflow]
+[explanation of which services are needed, which workflow, and why]
 
 ### Step 2: Authenticate with Client Gateway
 [CG_AUTH variable setup]
 
 ### Step 3: Verify Prerequisites
-[grpcurl and SQL commands to confirm system state]
+[grpcurl and SQL commands to confirm system state, with docker-logs checks for Workflow A]
 
 ### Step 4: Seed Test Data
-[SQL inserts or gRPC calls to create prerequisite data]
+[SQL inserts or gRPC calls to create prerequisite data; note fake-miners auto-populates miner tables on Workflow A]
 
 ### Step 5: Execute
 [grpcurl commands with full payloads and auth headers]
@@ -867,22 +1028,25 @@ Present the guide as a numbered walkthrough with clear headers. Every command mu
 [rpk consume commands with expected payloads]
 
 #### 6.5 Application Logs
-[what to look for in which service's logs]
+[what to look for in which service's logs, including docker logs agent / fake-miners for Workflow A]
 
-#### 6.6 Real Agent Behavior (if applicable)
-[expected agent-side behavior and logs]
+#### 6.6 Agent Behavior (if applicable)
+[expected agent-side behavior and logs; where to look per workflow]
 
 ### Step 7: Cleanup
-[DELETE statements or docker compose down]
+[DELETE statements, make fake-miners-down if Workflow A, or docker compose down]
 
 ### Checklist
 Feature: _______________
 Branch: _______________
 Ticket: _______________
+Workflow: [ ] A (fake-miners)  [ ] B (host + real miners)
 
+[ ] Clean state established (strict `docker compose down -v` or targeted reset)
 [ ] Infrastructure running (PostgreSQL, ClickHouse, Redpanda)
-[ ] Services running (Client Gateway, Agent Gateway, Data Collector)
-[ ] Real agent connected (if needed)
+[ ] Server services running (Client Gateway, Agent Gateway, Data Collector)
+[ ] Agent connected (Workflow A: docker logs agent | Workflow B: air terminal)
+[ ] Fake-miners listeners up (Workflow A only)
 [ ] Client Gateway auth configured ($CG_AUTH)
 [ ] Prerequisite data verified
 [ ] Feature executed via gRPC
@@ -891,9 +1055,10 @@ Ticket: _______________
 [ ] PostgreSQL state verified
 [ ] ClickHouse state verified (if applicable)
 [ ] Kafka events verified (if applicable)
-[ ] Logs checked for errors
+[ ] Logs checked for errors (all services + agent + fake-miners where relevant)
 [ ] Agent behavior confirmed (if applicable)
 [ ] Test data cleaned up
+[ ] fake-miners-down (Workflow A) or air terminal Ctrl+C (Workflow B)
 ```
 
 ---
@@ -902,8 +1067,11 @@ Ticket: _______________
 
 - **Ask before assuming.** If the gRPC method, tables, or Kafka topics aren't clear from the code, ask. Do not invent method names or table structures.
 - **Read the code first.** Before generating the plan, read the relevant proto files, service implementations, and migrations to understand exactly what the feature does.
+- **Pick the workflow deliberately.** Default to Workflow A (fake-miners). Choose Workflow B only when the feature genuinely needs real firmware behavior; justify the choice in the "Rationale for workflow choice" field.
 - **Be explicit about what success looks like.** Don't just say "verify the response." Say "the response should contain `status: EXECUTION_PLAN_STATUS_SUCCESS` and all step details should show `status: EXECUTION_PLAN_STEP_DETAIL_STATUS_SUCCESS`."
-- **Respect distributed timing.** Some validations require waiting for async processing (Kafka consumption, agent execution). Indicate expected delays: "wait ~5 seconds for the agent to process the plan" or "allow ~10 seconds for Redpanda Connect to flush to ClickHouse."
+- **Start from a known-clean state.** Always include Step 1a (reset). Default to recommending the strict `docker compose down -v` path for first-time validation of a feature; offer the targeted-reset alternative for iteration. Stale state is a common source of confusing smoke-test failures — the extra 2 minutes of cold start is worth the diagnostic clarity.
+- **Respect distributed timing.** Some validations require waiting for async processing (Kafka consumption, agent execution, collector cycles). Indicate expected delays: "wait ~5 seconds for the agent to process the plan", "allow ~10 seconds for Redpanda Connect to flush to ClickHouse", "wait one scan interval (30s on Workflow A) before asserting miner rows exist".
+- **Respect the safety invariant.** PG `commander.agent.networks` is the source of truth for the agent's IP list. `./ips.json` is a runtime cache — never rely on editing it. Workflow A: seed fake-miners service names in PG (via `create_mock_registries.sql`). Workflow B: set real IPs in PG via `UpdateAgent` gRPC; never commit real IPs to seed files. Never mix the two.
 - **Keep it focused.** This is primarily a smoke test for the happy path. Include the 3-5 most critical rejection cases (missing required fields, invalid values, state preconditions) when the feature has validation logic, but don't try to cover every edge case.
 - **One feature at a time.** Each invocation covers one feature. If the developer wants to test multiple features, run the skill separately for each.
 - **Use reflection.** When unsure about exact field names or types, use `grpcurl describe` to get the correct proto definitions rather than guessing.
